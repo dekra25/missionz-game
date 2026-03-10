@@ -9,9 +9,9 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
     headers: {
-      'Content-Type': 'application/json',
-      ...authHeader(),
-    },
+  'Content-Type': 'application/json',
+  ...(authHeader() || {})
+} as HeadersInit,
   });
 
   if (!response.ok) {
