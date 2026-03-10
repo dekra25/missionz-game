@@ -9,9 +9,9 @@ MissionZ is a real-life mission game backend for children and youth with:
 - Global leaderboard
 
 ## Tech Stack
-- FastAPI
-- SQLAlchemy
-- SQLite (default, configurable)
+- FastAPI backend
+- React + Vite frontend
+- SQLAlchemy + SQLite (default, configurable)
 - JWT authentication
 
 ## Project Structure
@@ -21,6 +21,7 @@ MissionZ is a real-life mission game backend for children and youth with:
 - `backend/app/seed.py`: framework-first sample missions (3 per age group)
 
 ## Run Locally
+### 1) Backend
 ```bash
 cd backend
 python3 -m venv .venv
@@ -33,6 +34,17 @@ uvicorn app.main:app --reload --port 8001
 Open Swagger docs:
 - http://127.0.0.1:8001/docs
 
+### 2) Frontend Game App
+```bash
+cd frontend
+cp .env.example .env
+npm install
+npm run dev
+```
+
+Open:
+- http://localhost:5173
+
 ## Core API Flow
 1. Register/Login (`/api/auth/register`, `/api/auth/login`)
 2. Create player profile (`/api/player/create`)
@@ -44,4 +56,3 @@ Open Swagger docs:
 
 ## GitHub Repo Description (Suggested)
 **MissionZ: Grow to Hero** — FastAPI backend for a real-life mission game with age-based challenges, JWT + Google auth, AI verification hooks, XP leveling, leaderboards, and parent dashboard.
-

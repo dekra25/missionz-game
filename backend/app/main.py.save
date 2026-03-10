@@ -1,0 +1,342 @@
+cd /Users/nishantadeka/Documents/Playground/backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+Ctrl + O
+Enter
+Ctrl + X
+uvicorn app.main:app --reload --port 8001
+uvicorn app.main:app --reload --port 8001
+
+from datetime import datetime
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy.orm import Session
+from .config import settings
+from .db import Base, engine, get_db
+from .models import Mission, PlayerMission, PlayerProfile, User
+from .schemas import (
+    GoogleLoginIn,
+    LoginIn,
+    MissionStartIn,
+    MissionSubmitIn,
+    ParentLinkIn,
+    PlayerCreateIn,
+    RegisterIn,
+    TokenOut,
+)
+from .auth import create_access_token, get_current_user, hash_password, verify_password
+from .seed import seed_missions
+from .services import compute_level_stage, verify_google_id_token, verify_mission_with_ai
+
+app = FastAPI(title='MissionZ API', version='0.1.0')
+
+origins = [o.strip() for o in settings.cors_origins.split(',') if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins or ['*'],
+    allow_credentials=True,
+    allow_methods=['*'],
+    allow_headers=['*'],
+)
+
+
+@app.on_event('startup')
+def startup() -> None:
+    Base.metadata.create_all(bind=engine)
+    db = next(get_db())
+    try:
+        seed_missions(db)
+    finally:
+        db.close()
+
+
+@app.get('/api/health')
+def health() -> dict:
+    return {'status': 'ok', 'service': 'missionz-api'}
+
+
+@app.post('/api/auth/register', response_model=TokenOut)
+def register(payload: RegisterIn, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.email == payload.email).first()
+    if existing:
+        raise HTTPException(status_code=409, detail='Email already registered')
+
+    user = User(
+        email=payload.email,
+        password_hash=hash_password(payload.password),
+        full_name=payload.full_name,
+        provider='local',
+        role='player',
+    )
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+    token = create_access_token(user.id)
+    return TokenOut(access_token=token)
+
+
+@app.post('/api/auth/login', response_model=TokenOut)
+def login(payload: LoginIn, db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.email == payload.email).first()
+    if not user or not user.password_hash or not verify_password(payload.password, user.password_hash):
+        raise HTTPException(status_code=401, detail='Invalid credentials')
+    return TokenOut(access_token=create_access_token(user.id))
+
+
+@app.post('/api/auth/google', response_model=TokenOut)
+def google_login(payload: GoogleLoginIn, db: Session = Depends(get_db)):
+    try:
+        info = verify_google_id_token(payload.id_token)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail=str(exc))
+
+    email = info.get('email')
+    name = info.get('name') or email
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        user = User(email=email, full_name=name, provider='google', role='player')
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+    return TokenOut(access_token=create_access_token(user.id))
+
+
+@app.get('/api/auth/me')
+def me(current: User = Depends(get_current_user)):
+    return {
+        'id': current.id,
+        'email': current.email,
+        'full_name': current.full_name,
+        'provider': current.provider,
+        'role': current.role,
+    }
+
+
+@app.post('/api/player/create')
+def create_player(
+    payload: PlayerCreateIn,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    existing = db.query(PlayerProfile).filter(PlayerProfile.user_id == current.id).first()
+    if existing:
+        raise HTTPException(status_code=409, detail='Player profile already exists')
+
+    if payload.age_group in {'5-8', '9-12'} and not payload.parent_email:
+        raise HTTPException(status_code=400, detail='Parent email is required for ages 5-12')
+
+    profile = PlayerProfile(
+        user_id=current.id,
+        nickname=payload.nickname,
+        age_group=payload.age_group,
+        parent_email=payload.parent_email,
+        parent_email_verified=False if payload.parent_email else True,
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+@app.get('/api/player/profile')
+def get_player_profile(current: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    profile = db.query(PlayerProfile).filter(PlayerProfile.user_id == current.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail='Player profile not found')
+    return profile
+
+
+@app.get('/api/missions/available')
+def available_missions(current: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    profile = db.query(PlayerProfile).filter(PlayerProfile.user_id == current.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail='Player profile not found')
+    missions = db.query(Mission).filter(Mission.age_group == profile.age_group, Mission.active.is_(True)).all()
+    progress = {
+        pm.mission_id: pm.status
+        for pm in db.query(PlayerMission).filter(PlayerMission.player_id == profile.id).all()
+    }
+    return [
+        {
+            'id': m.id,
+            'title': m.title,
+            'description': m.description,
+            'age_group': m.age_group,
+            'category': m.category,
+            'difficulty': m.difficulty,
+            'xp_reward': m.xp_reward,
+            'coins_reward': m.coins_reward,
+            'status': progress.get(m.id, 'available'),
+        }
+        for m in missions
+    ]
+
+
+@app.post('/api/missions/start')
+def start_mission(
+    payload: MissionStartIn,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    profile = db.query(PlayerProfile).filter(PlayerProfile.user_id == current.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail='Player profile not found')
+
+    mission = db.get(Mission, payload.mission_id)
+    if not mission or mission.age_group != profile.age_group:
+        raise HTTPException(status_code=404, detail='Mission not found for this player')
+
+    existing = db.query(PlayerMission).filter(
+        PlayerMission.player_id == profile.id,
+        PlayerMission.mission_id == mission.id,
+    ).first()
+    if existing:
+        return {'message': 'Mission already started', 'status': existing.status}
+
+    row = PlayerMission(player_id=profile.id, mission_id=mission.id, status='active')
+    db.add(row)
+    db.commit()
+    return {'message': 'Mission started'}
+
+
+@app.post('/api/missions/submit')
+def submit_mission(
+    payload: MissionSubmitIn,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    profile = db.query(PlayerProfile).filter(PlayerProfile.user_id == current.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail='Player profile not found')
+
+    mission = db.get(Mission, payload.mission_id)
+    if not mission:
+        raise HTTPException(status_code=404, detail='Mission not found')
+
+    pm = db.query(PlayerMission).filter(
+        PlayerMission.player_id == profile.id,
+        PlayerMission.mission_id == mission.id,
+    ).first()
+    if not pm:
+        raise HTTPException(status_code=400, detail='Mission not started')
+
+    verified, feedback = verify_mission_with_ai(
+        mission_title=mission.title,
+        mission_prompt=mission.verification_prompt,
+        proof_type=payload.proof_type,
+        proof_base64=payload.proof_base64,
+    )
+
+    pm.proof_type = payload.proof_type
+    pm.proof_base64 = payload.proof_base64
+    pm.ai_feedback = feedback
+
+    if verified:
+        pm.status = 'completed'
+        pm.completed_at = datetime.utcnow()
+        profile.xp += mission.xp_reward
+        profile.coins += mission.coins_reward
+        profile.level, profile.stage = compute_level_stage(profile.xp)
+        db.commit()
+        return {
+            'verified': True,
+            'feedback': feedback,
+            'xp_added': mission.xp_reward,
+            'coins_added': mission.coins_reward,
+            'new_level': profile.level,
+            'new_stage': profile.stage,
+        }
+
+    pm.status = 'active'
+    db.commit()
+    return {'verified': False, 'feedback': feedback}
+
+
+@app.get('/api/player/stats')
+def player_stats(current: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    profile = db.query(PlayerProfile).filter(PlayerProfile.user_id == current.id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail='Player profile not found')
+
+    completed = db.query(PlayerMission).filter(
+        PlayerMission.player_id == profile.id,
+        PlayerMission.status == 'completed',
+    ).count()
+    return {
+        'nickname': profile.nickname,
+        'age_group': profile.age_group,
+        'xp': profile.xp,
+        'coins': profile.coins,
+        'level': profile.level,
+        'stage': profile.stage,
+        'completed_missions': completed,
+        'streak_days': profile.streak_days,
+    }
+
+
+@app.get('/api/leaderboard/global')
+def leaderboard(db: Session = Depends(get_db)):
+    rows = db.query(PlayerProfile).order_by(PlayerProfile.xp.desc()).limit(50).all()
+    return [
+        {
+            'rank': i + 1,
+            'player_id': p.id,
+            'nickname': p.nickname,
+            'xp': p.xp,
+            'level': p.level,
+            'stage': p.stage,
+        }
+        for i, p in enumerate(rows)
+    ]
+
+
+@app.post('/api/parent/link')
+def parent_link(
+    payload: ParentLinkIn,
+    current: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if current.email.lower() != payload.parent_email.lower():
+        raise HTTPException(status_code=403, detail='You can only verify your own email')
+
+    child = db.get(PlayerProfile, payload.child_player_id)
+    if not child:
+        raise HTTPException(status_code=404, detail='Child profile not found')
+
+    if child.parent_email and child.parent_email.lower() != payload.parent_email.lower():
+        raise HTTPException(status_code=400, detail='Parent email mismatch for child account')
+
+    child.parent_email = payload.parent_email
+    child.parent_email_verified = True
+    db.commit()
+    return {'message': 'Parent linked and verified'}
+
+
+@app.get('/api/parent/dashboard')
+def parent_dashboard(current: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    children = db.query(PlayerProfile).filter(
+        PlayerProfile.parent_email == current.email,
+        PlayerProfile.parent_email_verified.is_(True),
+    ).all()
+
+    return [
+        {
+            'player_id': c.id,
+            'nickname': c.nickname,
+            'age_group': c.age_group,
+            'xp': c.xp,
+            'coins': c.coins,
+            'level': c.level,
+            'stage': c.stage,
+            'completed_missions': db.query(PlayerMission).filter(
+                PlayerMission.player_id == c.id,
+                PlayerMission.status == 'completed',
+            ).count(),
+        }
+        for c in children
+    ]

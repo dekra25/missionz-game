@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     google_client_id: Optional[str] = Field(default=None, alias='GOOGLE_CLIENT_ID')
     emergent_llm_key: Optional[str] = Field(default=None, alias='EMERGENT_LLM_KEY')
     gemini_api_key: Optional[str] = Field(default=None, alias='GEMINI_API_KEY')
-    cors_origins: str = Field(default='http://localhost:3000,http://localhost:8081', alias='CORS_ORIGINS')
+    cors_origins: str = Field(default='http://localhost:3000,http://localhost:8081,http://localhost:5173', alias='CORS_ORIGINS')
 
 
 settings = Settings()
