@@ -21,7 +21,7 @@ from .services import compute_level_stage, verify_google_id_token, verify_missio
 
 app = FastAPI(title='MissionZ API', version='0.1.0')
 
-origins = [o.strip() for o in settings.cors_origins.split(',') if o.strip()]
+origins = ["*"]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins or ['*'],
